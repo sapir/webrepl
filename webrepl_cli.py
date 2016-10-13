@@ -36,13 +36,14 @@ else:
             self.s = s
             self.buf = b""
 
-        def write(self, data):
+        def write(self, data, is_text=False):
             l = len(data)
+            type_ = 0x81 if is_text else 0x82
             if l < 126:
                 # TODO: hardcoded "binary" type
-                hdr = struct.pack(">BB", 0x82, l)
+                hdr = struct.pack(">BB", type_, l)
             else:
-                hdr = struct.pack(">BBH", 0x82, 126, l)
+                hdr = struct.pack(">BBH", type_, 126, l)
             self.s.send(hdr)
             self.s.send(data)
 
