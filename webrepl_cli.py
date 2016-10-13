@@ -44,8 +44,8 @@ else:
                 hdr = struct.pack(">BB", type_, l)
             else:
                 hdr = struct.pack(">BBH", type_, 126, l)
-            self.s.send(hdr)
-            self.s.send(data)
+            self.s.sendall(hdr)
+            self.s.sendall(data)
 
         def recvexactly(self, sz):
             res = b""
