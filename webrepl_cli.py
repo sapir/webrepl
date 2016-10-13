@@ -3,11 +3,20 @@ from __future__ import print_function
 import sys
 import os
 import struct
+import threading
 try:
     import usocket as socket
 except ImportError:
     import socket
 import websocket_helper
+
+
+try:
+    # python 2/3 support
+    input = raw_input
+except NameError:
+    pass
+
 
 # Define to 1 to use builtin "websocket" module of MicroPython
 USE_BUILTIN_WEBSOCKET = 0
@@ -166,11 +175,13 @@ def get_file(ws, local_file, remote_file):
 
 def help(rc=0):
     exename = sys.argv[0].rsplit("/", 1)[-1]
-    print("%s - Perform remote file operations using MicroPython WebREPL protocol" % exename)
+    print("%s - Access MicroPython through WebREPL protocol" % exename)
     print("Arguments:")
+    print("  <host>                            - Connect to REPL terminal")
     print("  <host>:<remote_file> <local_file> - Copy remote file to local file")
     print("  <local_file> <host>:<remote_file> - Copy local file to remote file")
     print("Examples:")
+    print("  %s 192.168.4.1" % exename)
     print("  %s script.py 192.168.4.1:/another_name.py" % exename)
     print("  %s script.py 192.168.4.1:/app/" % exename)
     print("  %s 192.168.4.1:/app/script.py ." % exename)
@@ -180,45 +191,97 @@ def error(msg):
     print(msg)
     sys.exit(1)
 
+def parse_addr(addr):
+    port = 8266
+
+    if ":" in addr:
+        host, port = addr.split(":")
+        port = int(port)
+    else:
+        host = addr
+
+    return (host, port)
+
 def parse_remote(remote):
-    host, fname = remote.rsplit(":", 1)
+    addr, fname = remote.rsplit(":", 1)
     if fname == "":
         fname = "/"
-    port = 8266
-    if ":" in host:
-        host, port = remote.split(":")
-        port = int(port)
+
+    host, port = parse_addr(addr)
     return (host, port, fname)
+
+
+class Repl:
+    def __init__(self, ws):
+        self.ws = ws
+
+        self.ignore_buf = b''
+
+        self.recv_thread = threading.Thread(target=self.recv_loop)
+        self.recv_thread.daemon = True
+        self.recv_thread.start()
+
+    def run(self):
+        while True:
+            code = input()
+            self.send(code)
+
+    def recv_loop(self):
+        while True:
+            c = self.ws.read(1, text_ok=True)
+
+            # check if this is an echoed char
+            if self.ignore_buf.startswith(c):
+                self.ignore_buf = self.ignore_buf[1:]
+            else:
+                # TODO: this doesn't actually handle multibyte chars
+                c = c.decode('utf-8')
+                sys.stdout.write(c)
+                sys.stdout.flush()
+
+    def send(self, code):
+        code = code.encode('utf-8')
+        code = code + b'\r\n'
+        # remote terminal will echo the chars, ignore them
+        self.ignore_buf += code
+        self.ws.write(code, is_text=True)
 
 
 def main():
 
-    if len(sys.argv) != 3:
-        help(1)
+    if len(sys.argv) == 2:
+        op = "repl"
+        host, port = parse_addr(sys.argv[1])
 
-    if ":" in sys.argv[1] and ":" in sys.argv[2]:
-        error("Operations on 2 remote files are not supported")
-    if ":" not in sys.argv[1] and ":" not in sys.argv[2]:
-        error("One remote file is required")
+    elif len(sys.argv) == 3:
 
-    if ":" in sys.argv[1]:
-        op = "get"
-        host, port, src_file = parse_remote(sys.argv[1])
-        dst_file = sys.argv[2]
-        if os.path.isdir(dst_file):
-            basename = src_file.rsplit("/", 1)[-1]
-            dst_file += "/" + basename
+        if ":" in sys.argv[1] and ":" in sys.argv[2]:
+            error("Operations on 2 remote files are not supported")
+        if ":" not in sys.argv[1] and ":" not in sys.argv[2]:
+            error("One remote file is required")
+
+        if ":" in sys.argv[1]:
+            op = "get"
+            host, port, src_file = parse_remote(sys.argv[1])
+            dst_file = sys.argv[2]
+            if os.path.isdir(dst_file):
+                basename = src_file.rsplit("/", 1)[-1]
+                dst_file += "/" + basename
+        else:
+            op = "put"
+            host, port, dst_file = parse_remote(sys.argv[2])
+            src_file = sys.argv[1]
+            if dst_file[-1] == "/":
+                basename = src_file.rsplit("/", 1)[-1]
+                dst_file += basename
+
     else:
-        op = "put"
-        host, port, dst_file = parse_remote(sys.argv[2])
-        src_file = sys.argv[1]
-        if dst_file[-1] == "/":
-            basename = src_file.rsplit("/", 1)[-1]
-            dst_file += basename
+        help(1)
 
     if 1:
         print(op, host, port)
-        print(src_file, "->", dst_file)
+        if op != "repl":
+            print(src_file, "->", dst_file)
 
     s = socket.socket()
 
@@ -226,7 +289,6 @@ def main():
     addr = ai[0][4]
 
     s.connect(addr)
-    #s = s.makefile("rwb")
     websocket_helper.client_handshake(s)
 
     ws = websocket(s)
@@ -234,15 +296,22 @@ def main():
     import getpass
     passwd = getpass.getpass()
     login(ws, passwd)
-    print("Remote WebREPL version:", get_ver(ws))
 
-    # Set websocket to send data marked as "binary"
-    ws.ioctl(9, 2)
+    if op == "repl":
+        repl = Repl(ws)
+        repl.run()
 
-    if op == "get":
-        get_file(ws, dst_file, src_file)
-    elif op == "put":
-        put_file(ws, src_file, dst_file)
+    else:
+
+        print("Remote WebREPL version:", get_ver(ws))
+
+        # Set websocket to send data marked as "binary"
+        ws.ioctl(9, 2)
+
+        if op == "get":
+            get_file(ws, dst_file, src_file)
+        elif op == "put":
+            put_file(ws, src_file, dst_file)
 
     s.close()
 
