@@ -1,1 +1,4 @@
 # empty file
+__pycache__
+*.pyc
+
